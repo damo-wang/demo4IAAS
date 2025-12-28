@@ -1,0 +1,21 @@
+{
+  "users": {
+    "alice": {
+      "password": "123456",
+      "tenant": "tenant-1",
+      "roles": ["ops"],
+      "bindings": {
+        "node-1": ["status", "exec"],
+        "node-2": ["status"]
+      }
+    },
+    "bob": {
+      "password": "123456",
+      "tenant": "tenant-2",
+      "roles": ["viewer"],
+      "bindings": {
+        "node-2": ["status"]
+      }
+    }
+  }
+}
