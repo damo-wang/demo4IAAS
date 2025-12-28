@@ -42,6 +42,13 @@ services:
       - cam-service
       - node-1
       - node-2
+      - mysql
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=iamuser
+      - DB_PASSWORD=iampass
+      - DB_NAME=iamdb
     networks:
       - backend
 

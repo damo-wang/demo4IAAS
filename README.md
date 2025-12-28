@@ -148,3 +148,12 @@ curl -X GET http://localhost:8000/nodes/node-1/status \
 | 资源权限模型（租户 / 角色 / 资源范围） | JWT Claims（tenant / roles / allowed_nodes） |
 | 强制访问控制（Policy Enforcement） | CAG 的 Token 校验 + 节点授权判断 |
 | 运维审计与合规日志 | CAG Audit Logs |
+
+
+http://localhost:8080/auth/login
+
+http://localhost:8080/auth/roles
+
+http://localhost:8080/auth/users
+
+http://localhost:8080/auth/users/bob/roles

@@ -1,15 +1,19 @@
 package main
 
 import (
+    "database/sql"
     "encoding/json"
     "fmt"
     "io"
     "log"
+    "net"
     "net/http"
+    "os"
     "strings"
     "time"
 
     "github.com/golang-jwt/jwt/v5"
+    _ "github.com/go-sql-driver/mysql"
 )
 
 var SECRET = []byte("super-secret-demo-key")
@@ -19,6 +23,8 @@ var nodeMap = map[string]string{
     "node-2": "http://node-2:8080",
 }
 
+// ==== JWT Claims ====
+
 type Claims struct {
     Sub    string              `json:"sub"`
     Tenant string              `json:"tenant"`
@@ -26,6 +32,69 @@ type Claims struct {
     Perms  map[string][]string `json:"perms"`
     jwt.RegisteredClaims
 }
+
+// ==== DB for audit ====
+
+var auditDB *sql.DB
+
+func getEnv(key, def string) string {
+    if v := os.Getenv(key); v != "" {
+        return v
+    }
+    return def
+}
+
+func initAuditDB() {
+    dbHost := getEnv("DB_HOST", "mysql")
+    dbPort := getEnv("DB_PORT", "3306")
+    dbUser := getEnv("DB_USER", "iamuser")
+    dbPass := getEnv("DB_PASSWORD", "iampass")
+    dbName := getEnv("DB_NAME", "iamdb")
+
+    dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci",
+        dbUser, dbPass, dbHost, dbPort, dbName)
+
+    var err error
+    auditDB, err = sql.Open("mysql", dsn)
+    if err != nil {
+        log.Fatalf("CAG: failed to open audit db: %v", err)
+    }
+
+    for i := 0; i < 10; i++ {
+        if err = auditDB.Ping(); err == nil {
+            break
+        }
+        log.Printf("CAG: waiting for mysql... (%d/10) err=%v", i+1, err)
+        time.Sleep(2 * time.Second)
+    }
+    if err != nil {
+        log.Fatalf("CAG: failed to connect mysql: %v", err)
+    }
+
+    // 审计表
+    _, err = auditDB.Exec(`
+        CREATE TABLE IF NOT EXISTS audit_logs (
+          id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+          timestamp    DATETIME NOT NULL,
+          username     VARCHAR(64) NOT NULL,
+          tenant       VARCHAR(64) NOT NULL,
+          node         VARCHAR(64) NOT NULL,
+          action       VARCHAR(64) NOT NULL,
+          method       VARCHAR(16) NOT NULL,
+          path         VARCHAR(255) NOT NULL,
+          status_code  INT NOT NULL,
+          allowed      TINYINT(1) NOT NULL,
+          source_ip    VARCHAR(64) NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `)
+    if err != nil {
+        log.Fatalf("CAG: create audit_logs failed: %v", err)
+    }
+
+    log.Println("CAG: audit DB ready")
+}
+
+// ==== JWT & 权限 ====
 
 func verify(r *http.Request) (*Claims, error) {
     h := r.Header.Get("Authorization")
@@ -61,36 +130,69 @@ func hasPermission(c *Claims, node, action string) bool {
     return false
 }
 
-func proxy(w http.ResponseWriter, r *http.Request, node, path string) {
+// ==== 审计写入 ====
+
+func clientIP(r *http.Request) string {
+    // 尝试从 X-Forwarded-For 取真实 IP（此处 nginx → CAG 同网，可简单用 RemoteAddr）
+    if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+        parts := strings.Split(xff, ",")
+        return strings.TrimSpace(parts[0])
+    }
+    host, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err != nil {
+        return r.RemoteAddr
+    }
+    return host
+}
+
+func writeAuditLog(claims *Claims, r *http.Request, node, action string, status int, allowed bool) {
+    if auditDB == nil {
+        return
+    }
+
+    _, err := auditDB.Exec(`
+        INSERT INTO audit_logs (timestamp, username, tenant, node, action, method, path, status_code, allowed, source_ip)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        time.Now().UTC(),
+        claims.Sub,
+        claims.Tenant,
+        node,
+        action,
+        r.Method,
+        r.URL.Path,
+        status,
+        boolToInt(allowed),
+        clientIP(r),
+    )
+    if err != nil {
+        log.Printf("CAG: failed to write audit log: %v", err)
+    }
+}
+
+func boolToInt(b bool) int {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+// ==== 反向代理 ====
+
+func proxy(w http.ResponseWriter, r *http.Request, node, path string) (*http.Response, error) {
     target, ok := nodeMap[node]
     if !ok {
-        http.Error(w, `{"error":"node_not_found"}`, http.StatusNotFound)
-        return
+        return nil, fmt.Errorf("node_not_found")
     }
-
-    var resp *http.Response
-    var err error
 
     if r.Method == http.MethodGet {
-        resp, err = http.Get(target + path)
-    } else {
-        body, _ := io.ReadAll(r.Body)
-        resp, err = http.Post(target+path, "application/json", strings.NewReader(string(body)))
+        return http.Get(target + path)
     }
 
-    if err != nil {
-        http.Error(w, `{"error":"proxy_error"}`, http.StatusInternalServerError)
-        return
-    }
-    defer resp.Body.Close()
-
-    logAccess(r, node, path, resp.StatusCode)
-
-    data, _ := io.ReadAll(resp.Body)
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(resp.StatusCode)
-    w.Write(data)
+    body, _ := io.ReadAll(r.Body)
+    return http.Post(target+path, "application/json", strings.NewReader(string(body)))
 }
+
+// ==== 具体 Handler ====
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {
     node := strings.TrimPrefix(r.URL.Path, "/nodes/")
@@ -102,12 +204,27 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    if !hasPermission(claims, node, "status") {
+    action := "status"
+    if !hasPermission(claims, node, action) {
+        writeAuditLog(claims, r, node, action, http.StatusForbidden, false)
         http.Error(w, `{"error":"access_denied"}`, http.StatusForbidden)
         return
     }
 
-    proxy(w, r, node, "/status")
+    resp, err := proxy(w, r, node, "/status")
+    if err != nil {
+        writeAuditLog(claims, r, node, action, http.StatusInternalServerError, true)
+        http.Error(w, `{"error":"proxy_error"}`, http.StatusInternalServerError)
+        return
+    }
+    defer resp.Body.Close()
+
+    data, _ := io.ReadAll(resp.Body)
+    writeAuditLog(claims, r, node, action, resp.StatusCode, true)
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(resp.StatusCode)
+    w.Write(data)
 }
 
 func execHandler(w http.ResponseWriter, r *http.Request) {
@@ -120,23 +237,27 @@ func execHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    if !hasPermission(claims, node, "exec") {
+    action := "exec"
+    if !hasPermission(claims, node, action) {
+        writeAuditLog(claims, r, node, action, http.StatusForbidden, false)
         http.Error(w, `{"error":"access_denied"}`, http.StatusForbidden)
         return
     }
 
-    proxy(w, r, node, "/exec")
-}
+    resp, err := proxy(w, r, node, "/exec")
+    if err != nil {
+        writeAuditLog(claims, r, node, action, http.StatusInternalServerError, true)
+        http.Error(w, `{"error":"proxy_error"}`, http.StatusInternalServerError)
+        return
+    }
+    defer resp.Body.Close()
 
-func logAccess(r *http.Request, node, action string, status int) {
-    fmt.Println("==== AUDIT LOG ====")
-    fmt.Println("time:", time.Now().UTC())
-    fmt.Println("method:", r.Method)
-    fmt.Println("path:", r.URL.Path)
-    fmt.Println("node:", node)
-    fmt.Println("action:", action)
-    fmt.Println("status:", status)
-    fmt.Println("====================")
+    data, _ := io.ReadAll(resp.Body)
+    writeAuditLog(claims, r, node, action, resp.StatusCode, true)
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(resp.StatusCode)
+    w.Write(data)
 }
 
 func home(w http.ResponseWriter, r *http.Request) {
@@ -144,6 +265,9 @@ func home(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+    initAuditDB()
+    defer auditDB.Close()
+
     http.HandleFunc("/", home)
     http.HandleFunc("/nodes/", func(w http.ResponseWriter, r *http.Request) {
         if strings.HasSuffix(r.URL.Path, "/status") && r.Method == http.MethodGet {
