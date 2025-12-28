@@ -14,3 +14,7 @@ services:
       - NODE_NAME=node-2
     ports:
       - "8102:8080"
+  cam-service:
+    build: ./cam
+    ports:
+      - "9000:9000"
