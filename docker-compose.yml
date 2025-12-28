@@ -18,3 +18,11 @@ services:
     build: ./cam
     ports:
       - "9000:9000"
+  cag-gateway:
+    build: ./cag
+    ports:
+      - "8000:8000"
+    depends_on:
+      - cam-service
+      - node-1
+      - node-2
