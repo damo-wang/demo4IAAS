@@ -1,10 +1,7 @@
-FROM python:3.11-slim
+FROM golang:1.22-alpine
 
 WORKDIR /app
+COPY . .
+RUN go build -o node .
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY app.py .
-
-CMD ["python", "app.py"]
+CMD ["./node"]
