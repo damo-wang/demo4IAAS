@@ -16,12 +16,9 @@ import (
     _ "github.com/go-sql-driver/mysql"
 )
 
-var SECRET = []byte("super-secret-demo-key")
+var SECRET = []byte(getEnv("JWT_SECRET", "dev-only-insecure-secret"))
 
-var nodeMap = map[string]string{
-    "node-1": "http://node-1:8080",
-    "node-2": "http://node-2:8080",
-}
+var nodeMap = map[string]string{} // 从配置文件加载
 
 // ==== JWT Claims ====
 
@@ -42,6 +39,23 @@ func getEnv(key, def string) string {
         return v
     }
     return def
+}
+
+func loadNodeMap() {
+    path := getEnv("NODES_CONFIG_PATH", "config/nodes.json")
+
+    f, err := os.Open(path)
+    if err != nil {
+        log.Fatalf("CAG: failed to open nodes config %s: %v", path, err)
+    }
+    defer f.Close()
+
+    dec := json.NewDecoder(f)
+    if err := dec.Decode(&nodeMap); err != nil {
+        log.Fatalf("CAG: failed to parse nodes config %s: %v", path, err)
+    }
+
+    log.Printf("CAG: loaded %d nodes from %s\n", len(nodeMap), path)
 }
 
 func initAuditDB() {
@@ -266,6 +280,7 @@ func home(w http.ResponseWriter, r *http.Request) {
 
 func main() {
     initAuditDB()
+    loadNodeMap()
     defer auditDB.Close()
 
     http.HandleFunc("/", home)

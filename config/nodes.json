@@ -1,0 +1,4 @@
+{
+  "node-1": "http://node-1:8080",
+  "node-2": "http://node-2:8080"
+}

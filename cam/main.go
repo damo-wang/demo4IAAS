@@ -14,7 +14,7 @@ import (
     _ "github.com/go-sql-driver/mysql"
 )
 
-var SECRET = []byte("super-secret-demo-key") // demo 用，生产请用安全方式管理
+var SECRET = []byte(getEnv("JWT_SECRET", "dev-only-insecure-secret"))
 
 var db *sql.DB
 
@@ -525,8 +525,9 @@ func main() {
     http.HandleFunc("/auth/users", listUsersHandler)
     http.HandleFunc("/auth/users/", updateUserRolesHandler)
 
-    log.Println("CAM listening on :9000")
-    if err := http.ListenAndServe(":9000", nil); err != nil {
+    port := getEnv("CAM_HTTP_PORT", "9000")
+    log.Printf("CAM listening on :%s\n", port)
+    if err := http.ListenAndServe(":"+port, nil); err != nil {
         log.Fatal(err)
     }
 }

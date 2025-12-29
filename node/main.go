@@ -2,68 +2,77 @@ package main
 
 import (
     "encoding/json"
-    "math/rand"
+    "log"
     "net/http"
     "os"
     "time"
 )
 
-type Status struct {
-    Node     string  `json:"node"`
-    CPUUsage float64 `json:"cpu_usage"`
-    MEMUsage float64 `json:"mem_usage"`
-}
-
-type ExecReq struct {
+type ExecRequest struct {
     Cmd string `json:"cmd"`
 }
 
-type ExecResp struct {
-    Node   string `json:"node"`
-    Cmd    string `json:"cmd"`
-    Result string `json:"result"`
-    Status string `json:"status"`
+type StatusResponse struct {
+    Node      string    `json:"node"`
+    Status    string    `json:"status"`
+    Timestamp time.Time `json:"timestamp"`
 }
 
-var nodeName = "unknown-node"
+type ExecResponse struct {
+    Node      string    `json:"node"`
+    Executed  bool      `json:"executed"`
+    Cmd       string    `json:"cmd"`
+    Timestamp time.Time `json:"timestamp"`
+}
+
+func getEnv(key, def string) string {
+    if v := os.Getenv(key); v != "" {
+        return v
+    }
+    return def
+}
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {
-    resp := Status{
-        Node:     nodeName,
-        CPUUsage: float64(rand.Intn(80)+10) / 100,
-        MEMUsage: float64(rand.Intn(80)+10) / 100,
+    nodeName := getEnv("NODE_NAME", "node-1")
+
+    resp := StatusResponse{
+        Node:      nodeName,
+        Status:    "ok",
+        Timestamp: time.Now().UTC(),
     }
+
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(resp)
 }
 
 func execHandler(w http.ResponseWriter, r *http.Request) {
-    var req ExecReq
-    _ = json.NewDecoder(r.Body).Decode(&req)
+    nodeName := getEnv("NODE_NAME", "node-1")
 
-    resp := ExecResp{
-        Node:   nodeName,
-        Cmd:    req.Cmd,
-        Result: "simulated result of `" + req.Cmd + "`",
-        Status: "ok",
+    var req ExecRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, `{"error":"bad_request"}`, http.StatusBadRequest)
+        return
     }
+
+    // Demo：不真正执行命令，只是 echo 回去
+    resp := ExecResponse{
+        Node:      nodeName,
+        Executed:  true,
+        Cmd:       req.Cmd,
+        Timestamp: time.Now().UTC(),
+    }
+
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(resp)
 }
 
-func rootHandler(w http.ResponseWriter, r *http.Request) {
-    json.NewEncoder(w).Encode(map[string]string{"msg": "Node Agent running on " + nodeName})
-}
-
 func main() {
-    rand.Seed(time.Now().UnixNano())
-    if n := os.Getenv("NODE_NAME"); n != "" {
-        nodeName = n
-    }
-
-    http.HandleFunc("/", rootHandler)
     http.HandleFunc("/status", statusHandler)
     http.HandleFunc("/exec", execHandler)
 
-    http.ListenAndServe(":8080", nil)
+    port := getEnv("NODE_HTTP_PORT", "8080")
+    log.Printf("Node [%s] listening on :%s\n", getEnv("NODE_NAME", "node-1"), port)
+    if err := http.ListenAndServe(":"+port, nil); err != nil {
+        log.Fatal(err)
+    }
 }
